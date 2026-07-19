@@ -7,6 +7,7 @@ import uuid
 
 import structlog
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import JSONResponse
 
 from api.schemas.requests import RunTaskRequest, RunTaskResponse, TaskStatusResponse
 from core.graph.workflow import run_task
@@ -22,11 +23,18 @@ async def submit_task(body: RunTaskRequest) -> RunTaskResponse:
     task_id = str(uuid.uuid4())
     log.info("api.task.submit", task_id=task_id, objective=body.objective[:80])
 
-    final_state = await run_task(
-        task_id     = task_id,
-        objective   = body.objective,
-        max_repairs = body.max_repairs,
-    )
+    try:
+        final_state = await run_task(
+            task_id     = task_id,
+            objective   = body.objective,
+            max_repairs = body.max_repairs,
+        )
+    except Exception as exc:
+        log.error("api.task.error", task_id=task_id, error=str(exc))
+        return JSONResponse(
+            status_code=503,
+            content={"detail": f"Workflow unavailable: {exc}", "task_id": task_id},
+        )
 
     await save_execution(final_state)
 

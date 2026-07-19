@@ -7,6 +7,17 @@ from __future__ import annotations
 from core.graph.state import AgentStatus, RepairStrategy
 
 
+def route_after_planner(state: dict) -> str:
+    """
+    After the planner node:
+      - If planning failed (ABORTED) → finalizer
+      - Otherwise                    → executor
+    """
+    if state["status"] == AgentStatus.ABORTED.value:
+        return "finalizer"
+    return "executor"
+
+
 def route_after_execution(state: dict) -> str:
     """
     After the executor node:

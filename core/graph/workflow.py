@@ -23,6 +23,7 @@ from langgraph.graph import END, START, StateGraph
 from core.graph.edges import (
     route_after_execution,
     route_after_learning,
+    route_after_planner,
     route_after_repair,
 )
 from core.graph.nodes import (
@@ -58,11 +59,18 @@ def build_workflow():
 
     # ── Entry & static edges ───────────────────────────────────────
     graph.add_edge(START,                  "planner")
-    graph.add_edge("planner",              "executor")
     graph.add_edge("failure_detector",     "root_cause_analyzer")
     graph.add_edge("root_cause_analyzer",  "plan_repairer")
 
     # ── Conditional edges ──────────────────────────────────────────
+    graph.add_conditional_edges(
+        "planner",
+        route_after_planner,
+        {
+            "executor":  "executor",   # normal path
+            "finalizer": "finalizer",  # planning failed → skip to finalizer
+        },
+    )
     graph.add_conditional_edges(
         "executor",
         route_after_execution,

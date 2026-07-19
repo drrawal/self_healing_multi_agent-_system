@@ -142,18 +142,36 @@ async def planner_node(state: dict, config: RunnableConfig) -> dict:
     registry   = _get_tool_registry()
     memory_mgr = _get_memory_manager()
 
-    available_tools   = registry.describe_all()
-    learned_context   = await memory_mgr.recall_strategies(state["objective"])
+    available_tools = registry.describe_all()
+    learned_context = await memory_mgr.recall_strategies(state["objective"])
 
     llm = _get_llm().with_structured_output(_PlannerOutput)
 
-    response = await llm.ainvoke([
-        SystemMessage(content=PLANNER_SYSTEM.format(
-            tools=available_tools,
-            learned_context=learned_context or "No prior context available.",
-        )),
-        HumanMessage(content=state["objective"]),
-    ])
+    try:
+        response = await llm.ainvoke([
+            SystemMessage(content=PLANNER_SYSTEM.format(
+                tools=available_tools,
+                learned_context=learned_context or "No prior context available.",
+            )),
+            HumanMessage(content=state["objective"]),
+        ])
+    except Exception as exc:
+        log.error("planner.llm_error", error=str(exc), task_id=state["task_id"])
+        return {
+            "plan": [],
+            "current_step_index": 0,
+            "status": AgentStatus.ABORTED.value,
+            "failures": [
+                {
+                    "step_id": "planner",
+                    "error": str(exc),
+                    "error_type": "llm_connection",
+                    "repaired": False,
+                }
+            ],
+            "messages": [AIMessage(content=f"Planning failed: {exc}")],
+            "learned_context": learned_context,
+        }
 
     plan = [PlanStep(
         description   = s.description,
@@ -282,27 +300,36 @@ async def root_cause_analyzer_node(state: dict, config: RunnableConfig) -> dict:
 
     llm = _get_llm().with_structured_output(_RCAOutput)
 
-    response = await llm.ainvoke([
-        SystemMessage(content=REFLECTION_SYSTEM.format(
-            step_description = step.description,
-            tool             = step.tool,
-            parameters       = step.parameters,
-            error            = failure.raw_error,
-            failure_type     = failure.failure_type,
-            history          = history,
-            kg_patterns      = kg_patterns or "No known patterns.",
-            strategies       = [s.value for s in RepairStrategy],
-        )),
-        HumanMessage(content="Analyse this failure and provide repair guidance."),
-    ])
-
-    updated_failure = {
-        **state["failures"][-1],
-        "root_cause":            response.root_cause,
-        "root_cause_confidence": response.confidence,
-        "repair_strategy":       response.repair_strategy or RepairStrategy.RETRY.value,
-        "repair_rationale":      response.repair_rationale,
-    }
+    try:
+        response = await llm.ainvoke([
+            SystemMessage(content=REFLECTION_SYSTEM.format(
+                step_description = step.description,
+                tool             = step.tool,
+                parameters       = step.parameters,
+                error            = failure.raw_error,
+                failure_type     = failure.failure_type,
+                history          = history,
+                kg_patterns      = kg_patterns or "No known patterns.",
+                strategies       = [s.value for s in RepairStrategy],
+            )),
+            HumanMessage(content="Analyse this failure and provide repair guidance."),
+        ])
+        updated_failure = {
+            **state["failures"][-1],
+            "root_cause":            response.root_cause,
+            "root_cause_confidence": response.confidence,
+            "repair_strategy":       response.repair_strategy or RepairStrategy.RETRY.value,
+            "repair_rationale":      response.repair_rationale,
+        }
+    except Exception as exc:
+        log.error("rca.llm_error", error=str(exc))
+        updated_failure = {
+            **state["failures"][-1],
+            "root_cause":            f"LLM unavailable: {exc}",
+            "root_cause_confidence": 0.0,
+            "repair_strategy":       RepairStrategy.RETRY.value,
+            "repair_rationale":      "Defaulting to retry due to LLM connection error.",
+        }
 
     log.info(
         "rca.done",
@@ -314,7 +341,7 @@ async def root_cause_analyzer_node(state: dict, config: RunnableConfig) -> dict:
     return {
         "failures": state["failures"][:-1] + [updated_failure],
         "messages": [AIMessage(content=f"RCA: {updated_failure['root_cause']}")],
-        "_rca_response": response.model_dump(),   # carry forward for repairer
+        "_rca_response": updated_failure,   # carry forward for repairer
     }
 
 
@@ -367,17 +394,20 @@ async def finalizer_node(state: dict, config: RunnableConfig) -> dict:
     """Produces a structured execution summary."""
     total_ms     = (time.time() - state["start_time"]) * 1000
     success_rate = _step_success_rate(state["step_results"])
+    was_aborted  = state.get("status") == AgentStatus.ABORTED.value
 
+    outcome = "aborted" if was_aborted else "completed"
     summary = (
-        f"Task '{state['task_id']}' completed in {total_ms:.0f} ms. "
+        f"Task '{state['task_id']}' {outcome} in {total_ms:.0f} ms. "
         f"Steps: {len(state['plan'])} | "
         f"Failures: {len(state['failures'])} | "
         f"Repairs: {state['repair_count']} | "
         f"Step success rate: {success_rate:.0%}"
     )
     log.info("finalizer", summary=summary)
+    final_status = AgentStatus.ABORTED.value if was_aborted else AgentStatus.COMPLETED.value
     return {
-        "status": AgentStatus.COMPLETED.value,
+        "status": final_status,
         "messages": [AIMessage(content=summary)],
     }
 
