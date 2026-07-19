@@ -1,116 +1,120 @@
 """
-MCP (Model Context Protocol) Server – exposes self-healing agent tools
-over the MCP JSON-RPC interface.
+MCP (Model Context Protocol) Server – built with FastMCP.
 
-This allows external MCP clients (e.g. Claude Desktop, VS Code Copilot)
-to invoke enterprise tools and query system state through a standard protocol.
+Exposes self-healing agent tools over the standard MCP protocol so that
+external clients (Claude Desktop, VS Code Copilot, etc.) can invoke them
+directly via JSON-RPC / SSE transport.
+
+Usage
+-----
+Standalone STDIO transport (for Claude Desktop / MCP Inspector):
+    python -m tools.mcp.server
+
+Mounted inside FastAPI (HTTP + SSE transport):
+    app.mount("/mcp", mcp.http_app())
 """
 from __future__ import annotations
 
-import json
-from typing import Any
+import uuid
+from typing import Annotated
 
 import structlog
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastmcp import FastMCP
+from pydantic import Field
 
 log = structlog.get_logger(__name__)
 
-mcp_app = FastAPI(title="SelfHeal MCP Server", version="1.0.0")
+# ── FastMCP instance ──────────────────────────────────────────────────────────
+
+mcp = FastMCP(
+    name="SH-MAS",
+    version="1.0.0",
+    instructions=(
+        "Self-Healing Multi-Agent System – run tasks, inspect healing metrics, "
+        "query the knowledge graph, and list enterprise tools."
+    ),
+)
 
 
-# ── MCP Tool Catalogue ─────────────────────────────────────────────────────────
+# ── Tools ─────────────────────────────────────────────────────────────────────
 
-MCP_TOOLS = {
-    "run_task": {
-        "description": "Submit a task to the self-healing multi-agent workflow.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "objective":    {"type": "string",  "description": "What to accomplish."},
-                "max_repairs":  {"type": "integer", "description": "Max self-repair attempts.", "default": 3},
-            },
-            "required": ["objective"],
-        },
-    },
-    "get_task_status": {
-        "description": "Get the current status of a running or completed task.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string", "description": "UUID of the task."},
-            },
-            "required": ["task_id"],
-        },
-    },
-    "list_tools": {
-        "description": "List all registered enterprise tools.",
-        "parameters": {"type": "object", "properties": {}, "required": []},
-    },
-    "get_knowledge_stats": {
-        "description": "Return statistics about the knowledge graph.",
-        "parameters": {"type": "object", "properties": {}, "required": []},
-    },
-}
+@mcp.tool()
+async def run_task(
+    objective: Annotated[str, Field(description="Task objective to accomplish", min_length=5)],
+    max_repairs: Annotated[int, Field(description="Maximum self-repair attempts (0–10)", ge=0, le=10)] = 3,
+) -> dict:
+    """Submit an objective to the self-healing multi-agent workflow and return the result."""
+    from core.graph.workflow import run_task as _run_task
+
+    task_id = str(uuid.uuid4())
+    log.info("mcp.run_task", task_id=task_id, objective=objective[:80])
+
+    state = await _run_task(task_id=task_id, objective=objective, max_repairs=max_repairs)
+    return {
+        "task_id"      : task_id,
+        "status"       : state.get("status"),
+        "repair_count" : state.get("repair_count", 0),
+        "failure_count": len(state.get("failures", [])),
+        "metrics"      : state.get("metrics", {}),
+    }
 
 
-# ── MCP Protocol Endpoints ─────────────────────────────────────────────────────
+@mcp.tool()
+async def get_task_status(
+    task_id: Annotated[str, Field(description="UUID of the task to look up")],
+) -> dict:
+    """Retrieve a completed task execution record from the persistence layer."""
+    from persistence.repositories import get_execution
 
-@mcp_app.get("/mcp/tools")
-async def list_mcp_tools() -> dict:
-    return {"tools": [
-        {"name": name, **spec}
-        for name, spec in MCP_TOOLS.items()
-    ]}
+    record = await get_execution(task_id)
+    if record is None:
+        return {"error": f"Task {task_id!r} not found."}
 
-
-@mcp_app.post("/mcp/invoke")
-async def invoke_mcp_tool(request: Request) -> JSONResponse:
-    body: dict = await request.json()
-    tool_name  = body.get("tool")
-    params     = body.get("parameters", {})
-
-    if tool_name not in MCP_TOOLS:
-        return JSONResponse(
-            status_code=404,
-            content={"error": f"Unknown tool: {tool_name!r}"},
-        )
-
-    try:
-        result = await _dispatch(tool_name, params)
-        return JSONResponse(content={"result": result})
-    except Exception as exc:
-        log.error("mcp.invoke_error", tool=tool_name, error=str(exc))
-        return JSONResponse(
-            status_code=500,
-            content={"error": str(exc)},
-        )
+    return {
+        "task_id"      : record.task_id,
+        "objective"    : record.objective,
+        "status"       : record.status,
+        "repair_count" : record.repair_count,
+        "failure_count": len(record.failures),
+        "duration_ms"  : record.duration_ms,
+        "metrics"      : record.metrics,
+    }
 
 
-async def _dispatch(tool_name: str, params: dict) -> Any:
-    if tool_name == "run_task":
-        import uuid
-        from core.graph.workflow import run_task
-        task_id   = str(uuid.uuid4())
-        objective = params["objective"]
-        max_rep   = int(params.get("max_repairs", 3))
-        state     = await run_task(task_id, objective, max_rep)
-        return {
-            "task_id" : task_id,
-            "status"  : state.get("status"),
-            "repairs" : state.get("repair_count", 0),
-            "failures": len(state.get("failures", [])),
-        }
+@mcp.tool()
+async def list_tools() -> dict:
+    """List all enterprise tools registered in the tool registry."""
+    from tools.registry import ToolRegistry
 
-    if tool_name == "get_task_status":
-        return {"message": "Retrieve from persistence layer (task_id lookup)."}
+    registry = ToolRegistry.instance()
+    return {"tools": registry.list_names()}
 
-    if tool_name == "list_tools":
-        from tools.registry import ToolRegistry
-        return {"tools": ToolRegistry.instance().list_names()}
 
-    if tool_name == "get_knowledge_stats":
-        from core.knowledge.graph import KnowledgeGraph
-        return KnowledgeGraph.instance().get_graph_stats()
+@mcp.tool()
+async def get_knowledge_stats() -> dict:
+    """Return node/edge counts and type breakdown for the knowledge graph."""
+    from core.knowledge.graph import KnowledgeGraph
 
-    raise ValueError(f"No dispatcher for {tool_name!r}")
+    return KnowledgeGraph.instance().get_graph_stats()
+
+
+@mcp.tool()
+async def get_healing_stats() -> dict:
+    """Return aggregate healing metrics across all recorded task executions."""
+    from persistence.repositories import get_healing_stats as _stats
+
+    return await _stats()
+
+
+# ── HTTP app (for FastAPI mount) ──────────────────────────────────────────────
+
+def get_mcp_http_app():
+    """Return an ASGI-compatible HTTP app for mounting inside FastAPI."""
+    return mcp.http_app(path="/")
+
+
+# ── Standalone entry-point (STDIO transport for MCP clients) ─────────────────
+
+if __name__ == "__main__":
+    mcp.run()  # defaults to STDIO transport
+

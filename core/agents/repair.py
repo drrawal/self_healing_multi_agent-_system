@@ -16,6 +16,7 @@ from typing import Any
 
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
+from pydantic import BaseModel, Field as _F
 
 from core.agents.base import BaseAgent
 from core.agents.llm_factory import build_llm
@@ -23,8 +24,8 @@ from core.graph.state import AgentStatus, PlanStep, RepairStrategy
 
 log = structlog.get_logger(__name__)
 
-from pydantic import BaseModel, Field as _F  # noqa: E402
 
+# ── Structured-output schema (replan) ────────────────────────────────────────
 
 class _PlanStepRaw(BaseModel):
     description: str = ""
@@ -38,6 +39,7 @@ class _PlanStepRaw(BaseModel):
 
 class _PlannerOutput(BaseModel):
     steps: list[_PlanStepRaw] = _F(default_factory=list)
+
 
 _REPLAN_PROMPT = """\
 You are a plan-repair agent.

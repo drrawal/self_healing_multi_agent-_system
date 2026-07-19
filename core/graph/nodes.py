@@ -15,6 +15,7 @@ from typing import Any
 import structlog
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
+from pydantic import BaseModel, Field as _F
 
 from core.graph.state import (
     AgentStatus,
@@ -29,9 +30,8 @@ from core.graph.state import (
 
 log = structlog.get_logger(__name__)
 
-# ── Private structured-output schemas ─────────────────────────────────────────
-from pydantic import BaseModel, Field as _F  # noqa: E402
 
+# ── Private structured-output schemas ─────────────────────────────────────────
 
 class _PlanStepRaw(BaseModel):
     description: str = ""

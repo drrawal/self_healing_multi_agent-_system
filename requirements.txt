@@ -21,6 +21,9 @@ fastapi>=0.115.5
 uvicorn[standard]>=0.32.0
 httpx>=0.28.0
 
+# MCP (Model Context Protocol)
+fastmcp>=2.0.0
+
 # Persistence
 sqlalchemy>=2.0.36
 aiosqlite>=0.20.0

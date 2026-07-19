@@ -15,7 +15,6 @@ from api.routes.tasks  import router as tasks_router
 from config.logging_config import configure_logging
 from config.settings import get_settings
 from persistence.database import init_db
-from tools.mcp.server import mcp_app
 
 log = structlog.get_logger(__name__)
 
@@ -82,7 +81,10 @@ def create_app() -> FastAPI:
     # ── Routes ─────────────────────────────────────────────────────
     app.include_router(tasks_router)
     app.include_router(health_router)
-    app.mount("/mcp", mcp_app)   # MCP protocol sub-app
+
+    # ── MCP sub-app (FastMCP HTTP + SSE transport) ─────────────────
+    from tools.mcp.server import get_mcp_http_app
+    app.mount("/mcp", get_mcp_http_app())
 
     return app
 
